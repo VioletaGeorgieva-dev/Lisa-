@@ -1,0 +1,797 @@
+
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include "lisa_controller.h"
+#include "lisa_player.h"
+
+/* ---------------------------------------------------------
+   Fake player: управляваме ръчно кога аудиото приключва.
+   --------------------------------------------------------- */
+
+static bool fake_playing = false;
+static bool fake_start_allowed = true;
+
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include "lisa_controller.h"
+#include "lisa_player.h"
+
+/* ---------------------------------------------------------
+   Fake player: управляваме ръчно кога аудиото приключва.
+   --------------------------------------------------------- */
+
+static bool fake_playing = false;
+static bool fake_start_allowed = true;
+
+static int question_start_count = 0;
+static int story_start_count = 0;
+static int prompt_start_count = 0;
+static int stop_count = 0;
+
+static int last_story_idx = -1;
+static uint32_t last_resume_position = 0;
+
+bool lisa_player_start_question(int story_idx, uint32_t position)
+{
+    (void)position;
+
+    if (!fake_start_allowed) return false;
+
+    last_story_idx = story_idx;
+    question_start_count++;
+    fake_playing = true;
+    return true;
+}
+
+bool lisa_player_start_prompt(uint32_t position)
+{
+    (void)position;
+
+    if (!fake_start_allowed) return false;
+
+    prompt_start_count++;
+    fake_playing = true;
+    return true;
+}
+
+bool lisa_player_start_story(int story_idx, uint32_t position)
+{
+    (void)position;
+
+    if (!fake_start_allowed) return false;
+
+    last_story_idx = story_idx;
+    story_start_count++;
+    fake_playing = true;
+    return true;
+}
+
+void lisa_player_stop(void)
+{
+    stop_count++;
+    fake_playing = false;
+}
+
+bool lisa_player_is_playing(void)
+{
+    return fake_playing;
+}
+
+bool lisa_player_process_audio_chunk(void)
+{
+    return false;
+}
+
+bool lisa_player_pause(uint32_t* position)
+{
+    if (!fake_playing) return false;
+
+    fake_playing = false;
+
+    if (position) {
+        *position = 12345;
+    }
+
+    return true;
+}
+
+bool lisa_player_resume(uint32_t position)
+{
+    last_resume_position = position;
+
+    if (!fake_start_allowed) return false;
+
+    fake_playing = true;
+    return true;
+}
+
+/* ---------------------------------------------------------
+   Test helpers
+   --------------------------------------------------------- */
+
+static int failures = 0;
+static int tests = 0;
+
+#define CHECK(condition, message) do {                 \
+    tests++;                                           \
+    if (!(condition)) {                                \
+        failures++;                                    \
+        printf("FAIL: %s (line %d)\n", message, __LINE__); \
+    } else {                                           \
+        printf("PASS: %s\n", message);                 \
+    }                                                  \
+} while (0)
+
+static void finish_audio(lisa_controller_t* c, uint64_t now_ms)
+{
+    fake_playing = false;
+    lisa_ctrl_poll(c, now_ms);
+}
+
+static void reset_fake_player(void)
+{
+    fake_playing = false;
+    fake_start_allowed = true;
+
+    question_start_count = 0;
+    story_start_count = 0;
+    prompt_start_count = 0;
+    stop_count = 0;
+
+    last_story_idx = -1;
+    last_resume_position = 0;
+}
+
+/* ---------------------------------------------------------
+   Test 1: Wake-up and question playback
+   --------------------------------------------------------- */
+
+static void test_wakeup_and_mic_hold(void)
+{
+    printf("\n=== TEST 1: Wake-up and microphone hold ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+
+    CHECK(action == LISA_ACTION_ASK_STORY,
+          "hey_lisa triggers ASK_STORY");
+
+    CHECK(fake_playing,
+          "Question audio starts");
+
+    CHECK(question_start_count == 1,
+          "Exactly one question starts");
+
+    CHECK(!lisa_ctrl_listening(&c, 1100),
+          "Microphone disabled during question");
+
+    lisa_ctrl_poll(&c, 1100);
+
+    finish_audio(&c, 1200);
+
+    CHECK(!lisa_ctrl_listening(&c, 1599),
+          "Microphone disabled before 400 ms hold expires");
+
+    CHECK(lisa_ctrl_listening(&c, 1600),
+          "Microphone enabled exactly after 400 ms");
+
+    CHECK(c.question_deadline_ms == 8600,
+          "Question timeout is 7000 ms after microphone hold");
+}
+
+/* ---------------------------------------------------------
+   Test 2: Question timeout and automatic repetition
+   --------------------------------------------------------- */
+
+static void test_question_timeout(void)
+{
+    printf("\n=== TEST 2: Question timeout ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_ctrl_poll(&c, 8599);
+
+    CHECK(question_start_count == 1,
+          "No repetition before timeout");
+
+    lisa_ctrl_poll(&c, 8600);
+
+    CHECK(question_start_count == 2,
+          "Question repeats at timeout");
+
+    CHECK(fake_playing,
+          "Repeated question audio starts");
+
+    CHECK(c.fsm.state == LISA_STATE_QUESTION,
+          "FSM remains in QUESTION state");
+}
+
+/* ---------------------------------------------------------
+   Test 3: YES starts the selected story
+   --------------------------------------------------------- */
+
+static void test_yes_starts_story(void)
+{
+    printf("\n=== TEST 3: YES starts story ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "da", 1600);
+
+    CHECK(action == LISA_ACTION_START_STORY,
+          "da triggers START_STORY");
+
+    CHECK(story_start_count == 1,
+          "Story starts exactly once");
+
+    CHECK(last_story_idx == 0,
+          "First story is selected");
+
+    CHECK(fake_playing,
+          "Story playback is active");
+
+    CHECK(c.fsm.state == LISA_STATE_PLAYING,
+          "FSM enters PLAYING state");
+}
+
+/* ---------------------------------------------------------
+   Test 4: NO advances to next story question
+   --------------------------------------------------------- */
+
+static void test_no_advances_story(void)
+{
+    printf("\n=== TEST 4: NO advances story ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "ne", 1600);
+
+    CHECK(action == LISA_ACTION_REPEAT_QUESTION,
+          "ne triggers REPEAT_QUESTION");
+
+    CHECK(c.fsm.current_story_idx == 1,
+          "Story index advances from 0 to 1");
+
+    CHECK(question_start_count == 2,
+          "Question for next story starts");
+
+    CHECK(fake_playing,
+          "Next question audio is active");
+
+    CHECK(c.fsm.state == LISA_STATE_QUESTION,
+          "FSM remains in QUESTION state");
+}
+
+/* ---------------------------------------------------------
+   Test 5: NO on last story wraps to first
+   --------------------------------------------------------- */
+
+static void test_no_wraps_to_first(void)
+{
+    printf("\n=== TEST 5: NO wraps around ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_ctrl_on_command(&c, "ne", 1600);
+    finish_audio(&c, 2200);
+
+    lisa_ctrl_on_command(&c, "ne", 2600);
+    finish_audio(&c, 3200);
+
+    lisa_ctrl_on_command(&c, "ne", 3600);
+
+    CHECK(c.fsm.current_story_idx == 0,
+          "NO on third story wraps to first");
+
+    CHECK(question_start_count == 4,
+          "First story question starts again");
+}
+
+/* ---------------------------------------------------------
+   Test 6: Sleep during question
+   --------------------------------------------------------- */
+
+static void test_sleep_during_question(void)
+{
+    printf("\n=== TEST 6: Sleep during question ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "zaspi", 1100);
+
+    CHECK(action == LISA_ACTION_GO_SLEEP,
+          "zaspi triggers GO_SLEEP");
+
+    CHECK(!fake_playing,
+          "Question audio stops");
+
+    CHECK(c.fsm.state == LISA_STATE_SLEEP,
+          "FSM enters SLEEP state");
+
+    CHECK(c.question_deadline_ms == 0,
+          "Question timeout is cleared");
+}
+
+/* ---------------------------------------------------------
+   Test 7: Story playback completion
+   --------------------------------------------------------- */
+
+static void test_story_completion(void)
+{
+    printf("\n=== TEST 7: Story completion ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_ctrl_on_command(&c, "da", 1600);
+
+    finish_audio(&c, 5000);
+
+    CHECK(c.fsm.state == LISA_STATE_IDLE,
+          "Finished story returns FSM to IDLE");
+
+    CHECK(!fake_playing,
+          "Player is no longer active");
+
+    CHECK(c.fsm.saved_position_bytes == 0,
+          "Saved playback position is cleared");
+}
+
+/* ---------------------------------------------------------
+   Main
+   --------------------------------------------------------- */
+
+int main(void)
+{
+    printf("\n====================================\n");
+    printf(" LISA CONTROLLER HOST TESTS\n");
+    printf("====================================\n");
+
+    test_wakeup_and_mic_hold();
+    test_question_timeout();
+    test_yes_starts_story();
+    test_no_advances_story();
+    test_no_wraps_to_first();
+    test_sleep_during_question();
+    test_story_completion();
+
+    printf("\n====================================\n");
+    printf("RESULT: %d/%d passed\n",
+           tests - failures, tests);
+    printf("FAILURES: %d\n", failures);
+    printf("====================================\n");
+
+    return failures == 0 ? 0 : 1;
+}
+
+
+static int question_start_count = 0;
+static int story_start_count = 0;
+static int prompt_start_count = 0;
+static int stop_count = 0;
+
+static int last_story_idx = -1;
+static uint32_t last_resume_position = 0;
+
+bool lisa_player_start_question(int story_idx, uint32_t position)
+{
+    (void)position;
+
+    if (!fake_start_allowed) return false;
+
+    last_story_idx = story_idx;
+    question_start_count++;
+    fake_playing = true;
+    return true;
+}
+
+bool lisa_player_start_prompt(uint32_t position)
+{
+    (void)position;
+
+    if (!fake_start_allowed) return false;
+
+    prompt_start_count++;
+    fake_playing = true;
+    return true;
+}
+
+bool lisa_player_start_story(int story_idx, uint32_t position)
+{
+    (void)position;
+
+    if (!fake_start_allowed) return false;
+
+    last_story_idx = story_idx;
+    story_start_count++;
+    fake_playing = true;
+    return true;
+}
+
+void lisa_player_stop(void)
+{
+    stop_count++;
+    fake_playing = false;
+}
+
+bool lisa_player_is_playing(void)
+{
+    return fake_playing;
+}
+
+bool lisa_player_process_audio_chunk(void)
+{
+    return false;
+}
+
+bool lisa_player_pause(uint32_t* position)
+{
+    if (!fake_playing) return false;
+
+    fake_playing = false;
+
+    if (position) {
+        *position = 12345;
+    }
+
+    return true;
+}
+
+bool lisa_player_resume(uint32_t position)
+{
+    last_resume_position = position;
+
+    if (!fake_start_allowed) return false;
+
+    fake_playing = true;
+    return true;
+}
+
+/* ---------------------------------------------------------
+   Test helpers
+   --------------------------------------------------------- */
+
+static int failures = 0;
+static int tests = 0;
+
+#define CHECK(condition, message) do {                 \
+    tests++;                                           \
+    if (!(condition)) {                                \
+        failures++;                                    \
+        printf("FAIL: %s (line %d)\n", message, __LINE__); \
+    } else {                                           \
+        printf("PASS: %s\n", message);                 \
+    }                                                  \
+} while (0)
+
+static void finish_audio(lisa_controller_t* c, uint64_t now_ms)
+{
+    fake_playing = false;
+    lisa_ctrl_poll(c, now_ms);
+}
+
+static void reset_fake_player(void)
+{
+    fake_playing = false;
+    fake_start_allowed = true;
+
+    question_start_count = 0;
+    story_start_count = 0;
+    prompt_start_count = 0;
+    stop_count = 0;
+
+    last_story_idx = -1;
+    last_resume_position = 0;
+}
+
+/* ---------------------------------------------------------
+   Test 1: Wake-up and question playback
+   --------------------------------------------------------- */
+
+static void test_wakeup_and_mic_hold(void)
+{
+    printf("\n=== TEST 1: Wake-up and microphone hold ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+
+    CHECK(action == LISA_ACTION_ASK_STORY,
+          "hey_lisa triggers ASK_STORY");
+
+    CHECK(fake_playing,
+          "Question audio starts");
+
+    CHECK(question_start_count == 1,
+          "Exactly one question starts");
+
+    CHECK(!lisa_ctrl_listening(&c, 1100),
+          "Microphone disabled during question");
+
+    lisa_ctrl_poll(&c, 1100);
+
+    finish_audio(&c, 1200);
+
+    CHECK(!lisa_ctrl_listening(&c, 1599),
+          "Microphone disabled before 400 ms hold expires");
+
+    CHECK(lisa_ctrl_listening(&c, 1600),
+          "Microphone enabled exactly after 400 ms");
+
+    CHECK(c.question_deadline_ms == 8600,
+          "Question timeout is 7000 ms after microphone hold");
+}
+
+/* ---------------------------------------------------------
+   Test 2: Question timeout and automatic repetition
+   --------------------------------------------------------- */
+
+static void test_question_timeout(void)
+{
+    printf("\n=== TEST 2: Question timeout ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_ctrl_poll(&c, 8599);
+
+    CHECK(question_start_count == 1,
+          "No repetition before timeout");
+
+    lisa_ctrl_poll(&c, 8600);
+
+    CHECK(question_start_count == 2,
+          "Question repeats at timeout");
+
+    CHECK(fake_playing,
+          "Repeated question audio starts");
+
+    CHECK(c.fsm.state == LISA_STATE_QUESTION,
+          "FSM remains in QUESTION state");
+}
+
+/* ---------------------------------------------------------
+   Test 3: YES starts the selected story
+   --------------------------------------------------------- */
+
+static void test_yes_starts_story(void)
+{
+    printf("\n=== TEST 3: YES starts story ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "da", 1600);
+
+    CHECK(action == LISA_ACTION_START_STORY,
+          "da triggers START_STORY");
+
+    CHECK(story_start_count == 1,
+          "Story starts exactly once");
+
+    CHECK(last_story_idx == 0,
+          "First story is selected");
+
+    CHECK(fake_playing,
+          "Story playback is active");
+
+    CHECK(c.fsm.state == LISA_STATE_PLAYING,
+          "FSM enters PLAYING state");
+}
+
+/* ---------------------------------------------------------
+   Test 4: NO advances to next story question
+   --------------------------------------------------------- */
+
+static void test_no_advances_story(void)
+{
+    printf("\n=== TEST 4: NO advances story ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "ne", 1600);
+
+    CHECK(action == LISA_ACTION_REPEAT_QUESTION,
+          "ne triggers REPEAT_QUESTION");
+
+    CHECK(c.fsm.current_story_idx == 1,
+          "Story index advances from 0 to 1");
+
+    CHECK(question_start_count == 2,
+          "Question for next story starts");
+
+    CHECK(fake_playing,
+          "Next question audio is active");
+
+    CHECK(c.fsm.state == LISA_STATE_QUESTION,
+          "FSM remains in QUESTION state");
+}
+
+/* ---------------------------------------------------------
+   Test 5: NO on last story wraps to first
+   --------------------------------------------------------- */
+
+static void test_no_wraps_to_first(void)
+{
+    printf("\n=== TEST 5: NO wraps around ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_ctrl_on_command(&c, "ne", 1600);
+    finish_audio(&c, 2200);
+
+    lisa_ctrl_on_command(&c, "ne", 2600);
+    finish_audio(&c, 3200);
+
+    lisa_ctrl_on_command(&c, "ne", 3600);
+
+    CHECK(c.fsm.current_story_idx == 0,
+          "NO on third story wraps to first");
+
+    CHECK(question_start_count == 4,
+          "First story question starts again");
+}
+
+/* ---------------------------------------------------------
+   Test 6: Sleep during question
+   --------------------------------------------------------- */
+
+static void test_sleep_during_question(void)
+{
+    printf("\n=== TEST 6: Sleep during question ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+
+    lisa_action_t action =
+        lisa_ctrl_on_command(&c, "zaspi", 1100);
+
+    CHECK(action == LISA_ACTION_GO_SLEEP,
+          "zaspi triggers GO_SLEEP");
+
+    CHECK(!fake_playing,
+          "Question audio stops");
+
+    CHECK(c.fsm.state == LISA_STATE_SLEEP,
+          "FSM enters SLEEP state");
+
+    CHECK(c.question_deadline_ms == 0,
+          "Question timeout is cleared");
+}
+
+/* ---------------------------------------------------------
+   Test 7: Story playback completion
+   --------------------------------------------------------- */
+
+static void test_story_completion(void)
+{
+    printf("\n=== TEST 7: Story completion ===\n");
+
+    reset_fake_player();
+
+    lisa_controller_t c;
+    lisa_ctrl_init(&c, 3, 1000);
+
+    lisa_ctrl_on_command(&c, "hey_lisa", 1000);
+    finish_audio(&c, 1200);
+
+    lisa_ctrl_on_command(&c, "da", 1600);
+
+    finish_audio(&c, 5000);
+
+    CHECK(c.fsm.state == LISA_STATE_IDLE,
+          "Finished story returns FSM to IDLE");
+
+    CHECK(!fake_playing,
+          "Player is no longer active");
+
+    CHECK(c.fsm.saved_position_bytes == 0,
+          "Saved playback position is cleared");
+}
+
+/* ---------------------------------------------------------
+   Main
+   --------------------------------------------------------- */
+
+int main(void)
+{
+    printf("\n====================================\n");
+    printf(" LISA CONTROLLER HOST TESTS\n");
+    printf("====================================\n");
+
+    test_wakeup_and_mic_hold();
+    test_question_timeout();
+    test_yes_starts_story();
+    test_no_advances_story();
+    test_no_wraps_to_first();
+    test_sleep_during_question();
+    test_story_completion();
+
+    printf("\n====================================\n");
+    printf("RESULT: %d/%d passed\n",
+           tests - failures, tests);
+    printf("FAILURES: %d\n", failures);
+    printf("====================================\n");
+
+    return failures == 0 ? 0 : 1;
+}

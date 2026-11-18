@@ -1,0 +1,52 @@
+#ifndef COMMAND_STATE_H
+#define COMMAND_STATE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define LISA_INACTIVITY_TIMEOUT_MS (15ULL * 60ULL * 1000ULL) // 15 minutes
+
+typedef enum {
+    LISA_STATE_IDLE = 0,     // Listens only for hey_lisa
+    LISA_STATE_QUESTION,     // Asks "Искаш ли приказка?", accepts da / ne
+    LISA_STATE_PLAYING,      // Plays story, accepts spri, pauziraj, predishna, sledvashta, zaspi
+    LISA_STATE_PAUSED,       // Story paused, accepts napred, spri, zaspi
+    LISA_STATE_SLEEP         // Sleep mode, wakes on hey_lisa
+} lisa_state_t;
+
+typedef enum {
+    LISA_ACTION_NONE = 0,
+    LISA_ACTION_ASK_STORY,       // Play prompt "Искаш ли приказка?"
+    LISA_ACTION_START_STORY,     // Start current story from beginning
+    LISA_ACTION_REPEAT_QUESTION, // Repeat question on "ne"
+    LISA_ACTION_PAUSE_STORY,     // Pause playback & save position
+    LISA_ACTION_RESUME_STORY,    // Resume from saved position
+    LISA_ACTION_STOP_STORY,      // Stop story & return to IDLE
+    LISA_ACTION_PREV_STORY,      // Switch to previous story & play
+    LISA_ACTION_NEXT_STORY,      // Switch to next story & play
+    LISA_ACTION_GO_SLEEP         // Enter sleep mode
+} lisa_action_t;
+
+typedef struct {
+    lisa_state_t state;
+    uint64_t last_activity_ms;
+    int current_story_idx;
+    int total_stories;
+    uint32_t saved_position_bytes;
+} lisa_fsm_t;
+
+void lisa_fsm_init(lisa_fsm_t* fsm, int total_stories, uint64_t now_ms);
+lisa_action_t lisa_fsm_process_command(lisa_fsm_t* fsm, const char* command, uint64_t now_ms);
+lisa_action_t lisa_fsm_tick(lisa_fsm_t* fsm, uint64_t now_ms);
+const char* lisa_state_to_str(lisa_state_t state);
+const char* lisa_action_to_str(lisa_action_t action);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // COMMAND_STATE_H

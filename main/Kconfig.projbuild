@@ -1,0 +1,39 @@
+menu "Lisa application"
+
+    config LISA_MAX_UTTERANCE_MS
+        int "Longest utterance handed to the recognizer (ms)"
+        default 3000
+        range 1000 10000
+        help
+            The microphone buffer is MAX_UTTERANCE_MS of 16 kHz float audio
+            in PSRAM. An utterance this long is cut and classified.
+
+    config LISA_VAD_START_DB
+        int "VAD: speech start threshold above the noise floor (dB)"
+        default 10
+        help
+            Engineering default, not calibrated. Tune on the device.
+
+    config LISA_VAD_ABS_MIN_RMS_MILLI
+        int "VAD: absolute minimum RMS (x1000, full scale = 1000)"
+        default 3
+        help
+            Engineering default, not calibrated. Tune on the device.
+
+    config LISA_VAD_HANGOVER_MS
+        int "VAD: silence that ends an utterance (ms)"
+        default 600
+
+    config LISA_VAD_PREROLL_MS
+        int "VAD: audio kept before the speech start (ms)"
+        default 300
+
+    config LISA_WDT_PATH
+        string "Command dictionary path on the SD card"
+        default "/sdcard/commands.wdt"
+
+    config LISA_MODEL_PARTITION
+        string "Partition label holding whistle_d4.cact"
+        default "whistle_model"
+
+endmenu

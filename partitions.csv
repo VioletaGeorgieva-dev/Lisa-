@@ -1,0 +1,9 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# Same layout as the upstream whistle_demo (esp32/whistle_demo/partitions.csv),
+# so whistle_d4.cact (14,515,887 B) stays at 0x210000 where it is already
+# flashed. 16 MB flash. The 2 MB app partition leaves room for the SD card
+# stack, the player and the classifier.
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x200000,
+whistle_model, data, 0x40,    0x210000, 0xDF0000,
